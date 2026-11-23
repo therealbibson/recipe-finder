@@ -39,7 +39,9 @@ const recipesSchema = z.array(recipeSchema).length(3);
 // ones, but individual models often return 503 "high demand" on the free
 // tier, so try several in turn — including the moving alias
 // gemini-flash-latest, which Google routes to whichever Flash model is
-// currently serving.
+// currently serving. For speed only the first GEMINI_ATTEMPTS entries
+// are actually tried (see the timing budget below); the rest stay
+// listed as spares if the budget is ever raised.
 const MODELS = [
   "gemini-3.5-flash",
   "gemini-3.6-flash",
@@ -61,6 +63,43 @@ async function generateWithModel(
   return text;
 }
 
+// Race a promise against a timer. The Gemini SDK call has no
+// AbortSignal, so on timeout the race just lets us move on — the
+// underlying SDK call may keep running in the background, but the
+// request no longer waits for it.
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} timed out after ${ms}ms`)),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Timing budget (why the app used to hit the client's 75s timeout):
+// each AI attempt gets at most 10s, at most 2 Gemini + 1 Groq
+// attempts run, and all AI attempts together get at most 25s.
+// After that the local fallback answers immediately, so the
+// worst-case server time is ~25-30s — well under the 75s client
+// timeout. A single slow/overloaded model can no longer stall
+// the whole request.
+const ATTEMPT_TIMEOUT_MS = 10_000;
+const AI_DEADLINE_MS = 25_000;
+const GEMINI_ATTEMPTS = 2;
+const GROQ_ATTEMPTS = 1;
+
 // Groq fallback. Plain fetch, no new dependency. Do NOT use
 // llama-3.3-70b-versatile or llama-3.1-8b-instant — they are
 // Enterprise-only since Aug 2026. The gpt-oss models below are the
@@ -72,6 +111,7 @@ async function generateWithGroq(
   modelName: string,
   systemInstruction: string,
   prompt: string,
+  timeoutMs: number = ATTEMPT_TIMEOUT_MS,
 ): Promise<string> {
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
@@ -88,7 +128,7 @@ async function generateWithGroq(
       temperature: 0.7,
       response_format: { type: "json_object" },
     }),
-    signal: AbortSignal.timeout(25000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -159,13 +199,26 @@ export async function POST(request: Request) {
 
   // Flow: Gemini -> Groq -> local fallback. A valid request never
   // returns 502/503 — the local library always returns 3 recipes.
+  // Overall AI deadline: once this passes, stop trying AI and go
+  // straight to the local fallback.
   const failures: string[] = [];
+  const aiDeadline = Date.now() + AI_DEADLINE_MS;
+  const remainingMs = () => aiDeadline - Date.now();
 
-  // 1. Gemini, if a key is set.
+  // 1. Gemini, if a key is set. At most the first 2 models, 10s each.
   if (geminiKey) {
-    for (const modelName of MODELS) {
+    for (const modelName of MODELS.slice(0, GEMINI_ATTEMPTS)) {
+      const budget = Math.min(ATTEMPT_TIMEOUT_MS, remainingMs());
+      if (budget <= 0) {
+        failures.push("gemini: AI deadline reached, skipping remaining models");
+        break;
+      }
       try {
-        const raw = await generateWithModel(geminiKey, modelName, prompt);
+        const raw = await withTimeout(
+          generateWithModel(geminiKey, modelName, prompt),
+          budget,
+          `Gemini ${modelName}`,
+        );
         const recipes = parseRecipes(raw);
         return NextResponse.json({ recipes, source: "gemini" });
       } catch (err) {
@@ -176,17 +229,18 @@ export async function POST(request: Request) {
         failures.push(`gemini/${modelName}: ${message}`);
         console.error(`Gemini recipe generation failed (${modelName}):`, err);
         // Try the next model for a retired-model (404), overloaded (503),
-        // or rate-limited (429) error, or an unparseable response — the
-        // next model may return clean JSON. Any other error (e.g. a bad
-        // key) is not worth another call.
+        // or rate-limited (429) error, a timed-out attempt, or an
+        // unparseable response — the next model may return clean JSON.
+        // Any other error (e.g. a bad key) is not worth another call.
         const isModelError = /not found|404|model/i.test(message);
         const isOverloaded = /503|429|overloaded|high demand|unavailable/i.test(
           message,
         );
+        const isTimeout = /timed out/i.test(message);
         const isParseError =
           err instanceof SyntaxError ||
           (err instanceof Error && err.name === "ZodError");
-        if (!isModelError && !isOverloaded && !isParseError) break;
+        if (!isModelError && !isOverloaded && !isTimeout && !isParseError) break;
       }
     }
     console.error("Gemini recipe generation failed (all models):", failures);
@@ -202,13 +256,19 @@ export async function POST(request: Request) {
       'You are a helpful worldwide recipe finder. Return STRICT JSON only — no markdown, no code fences, no extra text, no explanation. ' +
       "Return a JSON array of exactly 3 recipe objects. Each object must have exactly these fields: " +
       '{ "title": string, "timeMinutes": number, "servings": number, "difficulty": "Easy" | "Medium" | "Hard", "ingredientsUsed": string[], "ingredientsNeeded": string[], "ingredients": string[] (each with a quantity, e.g. "2 cups rice"), "steps": string[], "tip": string (optional) }';
-    for (const modelName of GROQ_MODELS) {
+    for (const modelName of GROQ_MODELS.slice(0, GROQ_ATTEMPTS)) {
+      const budget = Math.min(ATTEMPT_TIMEOUT_MS, remainingMs());
+      if (budget <= 0) {
+        failures.push("groq: AI deadline reached, skipping remaining models");
+        break;
+      }
       try {
         const raw = await generateWithGroq(
           groqKey,
           modelName,
           systemInstruction,
           prompt,
+          budget,
         );
         const recipes = parseRecipes(raw);
         return NextResponse.json({ recipes, source: "groq" });
