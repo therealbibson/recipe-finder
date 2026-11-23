@@ -322,11 +322,12 @@ export default function Home() {
                 <button
                   key={item}
                   type="button"
-                  onClick={() => addChip(item)}
-                  disabled={added}
+                  onClick={() => (added ? removeChip(item) : addChip(item))}
+                  aria-pressed={added}
+                  title={added ? "Tap to remove" : "Tap to add"}
                   className={`rounded-full border px-3 py-1.5 text-sm transition-colors ${
                     added
-                      ? "cursor-default border-teal-700 bg-teal-700 text-white opacity-70"
+                      ? "cursor-pointer border-teal-700 bg-teal-700 text-white hover:bg-teal-800"
                       : "border-slate-300 bg-white text-slate-700 hover:border-teal-700 hover:text-teal-700"
                   }`}
                 >
