@@ -34,14 +34,17 @@ const recipeSchema = z.object({
 const recipesSchema = z.array(recipeSchema).length(3);
 
 // Gemini 2.x models return 404 for new API keys/projects (Google retired
-// them for new users in Sep 2026 and suggests gemini-3.8-flash). Primary is
-// gemini-3.5-flash, which works on a free AI Studio key; 3.8-flash is
-// Google's suggested replacement but is often overloaded (503), so the
-// lite model is a third fallback.
+// them for new users in Sep 2026). The 3.x Flash models are the current
+// ones, but individual models often return 503 "high demand" on the free
+// tier, so try several in turn — including the moving alias
+// gemini-flash-latest, which Google routes to whichever Flash model is
+// currently serving.
 const MODELS = [
   "gemini-3.5-flash",
+  "gemini-3.6-flash",
   "gemini-3.8-flash",
   "gemini-3.5-flash-lite",
+  "gemini-flash-latest",
 ] as const;
 
 async function generateWithModel(
@@ -120,6 +123,7 @@ export async function POST(request: Request) {
     `Cuisine preference: ${cuisine || "any"}`,
   ].join("\n");
 
+  const failures: string[] = [];
   let lastError: unknown = null;
   for (const modelName of MODELS) {
     try {
@@ -129,10 +133,15 @@ export async function POST(request: Request) {
     } catch (err) {
       lastError = err;
       const message = err instanceof Error ? err.message : String(err);
-      // Fall back to the second model for a model-not-found error, or
-      // for an unparseable/invalid response — the second model may
-      // return clean JSON. Any other error (e.g. bad key, quota) is
-      // not worth a second call.
+      // Log every attempt, not just the last one — otherwise the logs
+      // only show the final fallback model and hide why the earlier
+      // models failed.
+      failures.push(`${modelName}: ${message}`);
+      console.error(`Gemini recipe generation failed (${modelName}):`, err);
+      // Try the next model for a retired-model (404), overloaded (503),
+      // or rate-limited (429) error, or an unparseable response — the
+      // next model may return clean JSON. Any other error (e.g. a bad
+      // key) is not worth another call.
       const isModelError = /not found|404|model/i.test(message);
       const isOverloaded = /503|429|overloaded|high demand|unavailable/i.test(
         message,
@@ -144,11 +153,15 @@ export async function POST(request: Request) {
     }
   }
 
-  console.error("Gemini recipe generation failed:", lastError);
+  console.error("Gemini recipe generation failed (all models):", failures);
+  const allOverloaded =
+    failures.length > 0 &&
+    failures.every((f) => /503|429|overloaded|high demand/i.test(f));
   return NextResponse.json(
     {
-      error:
-        "Could not generate recipes right now. Please try again in a moment.",
+      error: allOverloaded
+        ? "Gemini is busy right now (high demand). Please try again in a minute."
+        : "Could not generate recipes right now. Please try again in a moment.",
     },
     { status: 502 },
   );
