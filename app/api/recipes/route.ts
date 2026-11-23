@@ -33,7 +33,16 @@ const recipeSchema = z.object({
 
 const recipesSchema = z.array(recipeSchema).length(3);
 
-const MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"] as const;
+// Gemini 2.x models return 404 for new API keys/projects (Google retired
+// them for new users in Sep 2026 and suggests gemini-3.8-flash). Primary is
+// gemini-3.5-flash, which works on a free AI Studio key; 3.8-flash is
+// Google's suggested replacement but is often overloaded (503), so the
+// lite model is a third fallback.
+const MODELS = [
+  "gemini-3.5-flash",
+  "gemini-3.8-flash",
+  "gemini-3.5-flash-lite",
+] as const;
 
 async function generateWithModel(
   apiKey: string,
@@ -125,10 +134,13 @@ export async function POST(request: Request) {
       // return clean JSON. Any other error (e.g. bad key, quota) is
       // not worth a second call.
       const isModelError = /not found|404|model/i.test(message);
+      const isOverloaded = /503|429|overloaded|high demand|unavailable/i.test(
+        message,
+      );
       const isParseError =
         err instanceof SyntaxError ||
         (err instanceof Error && err.name === "ZodError");
-      if (!isModelError && !isParseError) break;
+      if (!isModelError && !isOverloaded && !isParseError) break;
     }
   }
 
