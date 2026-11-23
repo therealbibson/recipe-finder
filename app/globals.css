@@ -35,4 +35,17 @@ body {
     border: none !important;
     box-shadow: none !important;
   }
+  /* One recipe per printed page. */
+  #print-recipes article {
+    break-after: page;
+    page-break-after: always;
+  }
+  #print-recipes article:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+  /* Buttons (Print, Regenerate, Clear, Copy) should not appear on paper. */
+  #print-recipes button {
+    display: none !important;
+  }
 }
