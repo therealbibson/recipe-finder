@@ -111,6 +111,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const [source, setSource] = useState<"gemini" | "groq" | "local" | null>(null);
 
   useEffect(() => {
     try {
@@ -144,6 +145,7 @@ export default function Home() {
   async function handleFind() {
     setError("");
     setCopiedIndex(null);
+    setSource(null);
 
     if (ingredients.trim().length < 3) {
       setError("Tell us at least one ingredient you have — type it or tap a chip below.");
@@ -163,6 +165,10 @@ export default function Home() {
       return;
     }
 
+    // The API can hang when Gemini/Groq are overloaded — without a
+    // timeout the button would spin forever. Abort after 75 seconds.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 75_000);
     setLoading(true);
     try {
       const res = await fetch("/api/recipes", {
@@ -175,6 +181,7 @@ export default function Home() {
           diet,
           cuisine: cuisine === "Any" ? "" : cuisine,
         }),
+        signal: controller.signal,
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -190,9 +197,23 @@ export default function Home() {
         return;
       }
       setRecipes(data.recipes as Recipe[]);
-    } catch {
-      setError("Could not reach the server. Check your connection and try again.");
+      setSource(
+        data?.source === "local"
+          ? "local"
+          : data?.source === "groq"
+            ? "groq"
+            : data?.source === "gemini"
+              ? "gemini"
+              : null,
+      );
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        setError("That took too long. Please try again.");
+      } else {
+        setError("Could not reach the server. Check your connection and try again.");
+      }
     } finally {
+      clearTimeout(timeoutId);
       setLoading(false);
     }
   }
@@ -215,6 +236,7 @@ export default function Home() {
     setCuisine("Any");
     setRecipes([]);
     setError("");
+    setSource(null);
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch {
@@ -460,6 +482,11 @@ export default function Home() {
 
       {recipes.length > 0 && !loading && (
         <section id="print-recipes" className="mt-6">
+          {source === "local" && (
+            <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800">
+              AI was busy, so here are saved recipes you can make with what you have — try again later for fresh AI recipes.
+            </p>
+          )}
           <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-lg font-semibold text-slate-900">
               3 recipes you can make now

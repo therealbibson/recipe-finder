@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { z } from "zod";
+import { findLocalRecipes } from "./fallback-recipes";
 
 const bodySchema = z.object({
   ingredients: z
@@ -60,6 +61,47 @@ async function generateWithModel(
   return text;
 }
 
+// Groq fallback. Plain fetch, no new dependency. Do NOT use
+// llama-3.3-70b-versatile or llama-3.1-8b-instant — they are
+// Enterprise-only since Aug 2026. The gpt-oss models below are the
+// current Groq-hosted open models.
+const GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"] as const;
+
+async function generateWithGroq(
+  apiKey: string,
+  modelName: string,
+  systemInstruction: string,
+  prompt: string,
+): Promise<string> {
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: modelName,
+      messages: [
+        { role: "system", content: systemInstruction },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.7,
+      response_format: { type: "json_object" },
+    }),
+    signal: AbortSignal.timeout(25000),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Groq ${modelName} returned HTTP ${res.status}: ${body.slice(0, 200)}`);
+  }
+  const data = (await res.json()) as {
+    choices?: { message?: { content?: string } }[];
+  };
+  const text = data.choices?.[0]?.message?.content?.trim();
+  if (!text) throw new Error(`Empty response from Groq ${modelName}`);
+  return text;
+}
+
 function parseRecipes(raw: string) {
   // Strip ```json / ``` fences if Gemini added them, then parse.
   const cleaned = raw
@@ -92,16 +134,8 @@ export async function POST(request: Request) {
 
   const { ingredients, servings, maxTime, diet, cuisine } = parsed.data;
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(
-      {
-        error:
-          "GEMINI_API_KEY is not configured. Add it to .env.local (copy .env.example to .env.local and fill in your key).",
-      },
-      { status: 503 },
-    );
-  }
+  const geminiKey = process.env.GEMINI_API_KEY;
+  const groqKey = process.env.GROQ_API_KEY;
 
   const prompt = [
     "You are a helpful worldwide recipe finder. Return STRICT JSON only — no markdown, no code fences, no extra text, no explanation.",
@@ -123,46 +157,86 @@ export async function POST(request: Request) {
     `Cuisine preference: ${cuisine || "any"}`,
   ].join("\n");
 
+  // Flow: Gemini -> Groq -> local fallback. A valid request never
+  // returns 502/503 — the local library always returns 3 recipes.
   const failures: string[] = [];
-  let lastError: unknown = null;
-  for (const modelName of MODELS) {
-    try {
-      const raw = await generateWithModel(apiKey, modelName, prompt);
-      const recipes = parseRecipes(raw);
-      return NextResponse.json({ recipes });
-    } catch (err) {
-      lastError = err;
-      const message = err instanceof Error ? err.message : String(err);
-      // Log every attempt, not just the last one — otherwise the logs
-      // only show the final fallback model and hide why the earlier
-      // models failed.
-      failures.push(`${modelName}: ${message}`);
-      console.error(`Gemini recipe generation failed (${modelName}):`, err);
-      // Try the next model for a retired-model (404), overloaded (503),
-      // or rate-limited (429) error, or an unparseable response — the
-      // next model may return clean JSON. Any other error (e.g. a bad
-      // key) is not worth another call.
-      const isModelError = /not found|404|model/i.test(message);
-      const isOverloaded = /503|429|overloaded|high demand|unavailable/i.test(
-        message,
-      );
-      const isParseError =
-        err instanceof SyntaxError ||
-        (err instanceof Error && err.name === "ZodError");
-      if (!isModelError && !isOverloaded && !isParseError) break;
+
+  // 1. Gemini, if a key is set.
+  if (geminiKey) {
+    for (const modelName of MODELS) {
+      try {
+        const raw = await generateWithModel(geminiKey, modelName, prompt);
+        const recipes = parseRecipes(raw);
+        return NextResponse.json({ recipes, source: "gemini" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        // Log every attempt, not just the last one — otherwise the logs
+        // only show the final fallback model and hide why the earlier
+        // models failed.
+        failures.push(`gemini/${modelName}: ${message}`);
+        console.error(`Gemini recipe generation failed (${modelName}):`, err);
+        // Try the next model for a retired-model (404), overloaded (503),
+        // or rate-limited (429) error, or an unparseable response — the
+        // next model may return clean JSON. Any other error (e.g. a bad
+        // key) is not worth another call.
+        const isModelError = /not found|404|model/i.test(message);
+        const isOverloaded = /503|429|overloaded|high demand|unavailable/i.test(
+          message,
+        );
+        const isParseError =
+          err instanceof SyntaxError ||
+          (err instanceof Error && err.name === "ZodError");
+        if (!isModelError && !isOverloaded && !isParseError) break;
+      }
     }
+    console.error("Gemini recipe generation failed (all models):", failures);
+  } else {
+    console.error("Gemini recipe generation skipped: no GEMINI_API_KEY set.");
   }
 
-  console.error("Gemini recipe generation failed (all models):", failures);
-  const allOverloaded =
-    failures.length > 0 &&
-    failures.every((f) => /503|429|overloaded|high demand/i.test(f));
-  return NextResponse.json(
-    {
-      error: allOverloaded
-        ? "Gemini is busy right now (high demand). Please try again in a minute."
-        : "Could not generate recipes right now. Please try again in a moment.",
-    },
-    { status: 502 },
-  );
+  // 2. Groq, if a key is set. Same prompt, same strict-JSON parsing.
+  if (groqKey) {
+    // prompt is a single joined string, so spell the system instruction
+    // out — it is the same strict-JSON instruction as the Gemini prompt.
+    const systemInstruction =
+      'You are a helpful worldwide recipe finder. Return STRICT JSON only — no markdown, no code fences, no extra text, no explanation. ' +
+      "Return a JSON array of exactly 3 recipe objects. Each object must have exactly these fields: " +
+      '{ "title": string, "timeMinutes": number, "servings": number, "difficulty": "Easy" | "Medium" | "Hard", "ingredientsUsed": string[], "ingredientsNeeded": string[], "ingredients": string[] (each with a quantity, e.g. "2 cups rice"), "steps": string[], "tip": string (optional) }';
+    for (const modelName of GROQ_MODELS) {
+      try {
+        const raw = await generateWithGroq(
+          groqKey,
+          modelName,
+          systemInstruction,
+          prompt,
+        );
+        const recipes = parseRecipes(raw);
+        return NextResponse.json({ recipes, source: "groq" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        failures.push(`groq/${modelName}: ${message}`);
+        console.error(`Groq recipe generation failed (${modelName}):`, err);
+      }
+    }
+    console.error("Groq recipe generation failed (all models):", failures);
+  } else {
+    console.error("Groq recipe generation skipped: no GROQ_API_KEY set.");
+  }
+
+  // 3. Local fallback — always returns exactly 3 recipes, no key needed.
+  try {
+    const recipes = findLocalRecipes({
+      ingredients,
+      servings,
+      maxTime: maxTime ?? null,
+      diet,
+    });
+    return NextResponse.json({ recipes, source: "local" });
+  } catch (err) {
+    console.error("Local fallback failed:", err, "failures:", failures);
+    return NextResponse.json(
+      { error: "Could not generate recipes right now. Please try again in a moment." },
+      { status: 502 },
+    );
+  }
 }
