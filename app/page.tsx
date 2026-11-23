@@ -84,8 +84,9 @@ function recipeToText(recipe: Recipe): string {
 export default function Home() {
   const [ingredients, setIngredients] = useState("");
   // Kept as a string so the field can be cleared and typed freely.
+  // It starts at 0 with no default — the user enters their own number.
   // It is parsed and validated (1-12) only when finding recipes.
-  const [servings, setServings] = useState("4");
+  const [servings, setServings] = useState("0");
   const [maxTime, setMaxTime] = useState<MaxTime>(null);
   const [diet, setDiet] = useState<Diet>("Any");
   const [cuisine, setCuisine] = useState("Any");
@@ -148,16 +149,16 @@ export default function Home() {
       return;
     }
 
-    // Empty servings means "use the default (4)". Anything else must be
-    // a whole number between 1 and 12.
-    const servingsNumber =
-      servings.trim() === "" ? 4 : parseInt(servings, 10);
+    // No default: the user must enter their own servings. 0, blank, or
+    // anything outside 1-12 is rejected here.
+    const servingsNumber = parseInt(servings, 10);
     if (
+      servings.trim() === "" ||
       Number.isNaN(servingsNumber) ||
       servingsNumber < 1 ||
       servingsNumber > 12
     ) {
-      setError("Servings must be a whole number between 1 and 12.");
+      setError("Enter servings — a whole number between 1 and 12.");
       return;
     }
 
@@ -207,7 +208,7 @@ export default function Home() {
 
   function handleClear() {
     setIngredients("");
-    setServings("4");
+    setServings("0");
     setMaxTime(null);
     setDiet("Any");
     setCuisine("Any");
@@ -317,11 +318,11 @@ export default function Home() {
               max={12}
               value={servings}
               onChange={(e) => setServings(e.target.value)}
-              placeholder="4"
+              placeholder="0"
               className={inputClass}
             />
             <p className="mt-1 text-xs text-slate-400">
-              Leave blank for 4, or type any number from 1 to 12.
+              Enter how many servings you want, from 1 to 12.
             </p>
           </div>
           <div>
