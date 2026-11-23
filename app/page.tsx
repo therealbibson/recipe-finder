@@ -83,7 +83,9 @@ function recipeToText(recipe: Recipe): string {
 
 export default function Home() {
   const [ingredients, setIngredients] = useState("");
-  const [servings, setServings] = useState(4);
+  // Kept as a string so the field can be cleared and typed freely.
+  // It is parsed and validated (1-12) only when finding recipes.
+  const [servings, setServings] = useState("4");
   const [maxTime, setMaxTime] = useState<MaxTime>(null);
   const [diet, setDiet] = useState<Diet>("Any");
   const [cuisine, setCuisine] = useState("Any");
@@ -146,6 +148,19 @@ export default function Home() {
       return;
     }
 
+    // Empty servings means "use the default (4)". Anything else must be
+    // a whole number between 1 and 12.
+    const servingsNumber =
+      servings.trim() === "" ? 4 : parseInt(servings, 10);
+    if (
+      Number.isNaN(servingsNumber) ||
+      servingsNumber < 1 ||
+      servingsNumber > 12
+    ) {
+      setError("Servings must be a whole number between 1 and 12.");
+      return;
+    }
+
     setLoading(true);
     try {
       const res = await fetch("/api/recipes", {
@@ -153,7 +168,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ingredients,
-          servings,
+          servings: servingsNumber,
           maxTime: maxTime ?? undefined,
           diet,
           cuisine: cuisine === "Any" ? "" : cuisine,
@@ -192,7 +207,7 @@ export default function Home() {
 
   function handleClear() {
     setIngredients("");
-    setServings(4);
+    setServings("4");
     setMaxTime(null);
     setDiet("Any");
     setCuisine("Any");
@@ -301,12 +316,13 @@ export default function Home() {
               min={1}
               max={12}
               value={servings}
-              onChange={(e) => {
-                const n = parseInt(e.target.value, 10);
-                if (!Number.isNaN(n)) setServings(Math.min(12, Math.max(1, n)));
-              }}
+              onChange={(e) => setServings(e.target.value)}
+              placeholder="4"
               className={inputClass}
             />
+            <p className="mt-1 text-xs text-slate-400">
+              Leave blank for 4, or type any number from 1 to 12.
+            </p>
           </div>
           <div>
             <label htmlFor="cuisine" className={labelClass}>
