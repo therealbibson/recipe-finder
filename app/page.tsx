@@ -84,9 +84,10 @@ function recipeToText(recipe: Recipe): string {
 export default function Home() {
   const [ingredients, setIngredients] = useState("");
   // Kept as a string so the field can be cleared and typed freely.
-  // It starts at 0 with no default — the user enters their own number.
-  // It is parsed and validated (1-12) only when finding recipes.
-  const [servings, setServings] = useState("0");
+  // It starts empty — 0 is only a placeholder, not a value — and the
+  // user enters their own number. It is parsed and validated (1-12)
+  // only when finding recipes.
+  const [servings, setServings] = useState("");
   const [maxTime, setMaxTime] = useState<MaxTime>(null);
   const [diet, setDiet] = useState<Diet>("Any");
   const [cuisine, setCuisine] = useState("Any");
@@ -149,7 +150,7 @@ export default function Home() {
       return;
     }
 
-    // No default: the user must enter their own servings. 0, blank, or
+    // No default: the user must enter their own servings. Blank, 0, or
     // anything outside 1-12 is rejected here.
     const servingsNumber = parseInt(servings, 10);
     if (
@@ -208,7 +209,7 @@ export default function Home() {
 
   function handleClear() {
     setIngredients("");
-    setServings("0");
+    setServings("");
     setMaxTime(null);
     setDiet("Any");
     setCuisine("Any");
