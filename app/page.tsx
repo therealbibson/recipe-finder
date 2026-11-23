@@ -112,8 +112,6 @@ export default function Home() {
   const [error, setError] = useState("");
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [source, setSource] = useState<"gemini" | "groq" | "local" | null>(null);
-  // How long the successful search took, for the success banner.
-  const [searchSeconds, setSearchSeconds] = useState<number | null>(null);
 
   useEffect(() => {
     try {
@@ -148,7 +146,6 @@ export default function Home() {
     setError("");
     setCopiedIndex(null);
     setSource(null);
-    setSearchSeconds(null);
 
     if (ingredients.trim().length < 3) {
       setError("Tell us at least one ingredient you have — type it or tap a chip below.");
@@ -172,7 +169,6 @@ export default function Home() {
     // timeout the button would spin forever. Abort after 75 seconds.
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 75_000);
-    const startedAt = Date.now();
     setLoading(true);
     try {
       const res = await fetch("/api/recipes", {
@@ -201,9 +197,6 @@ export default function Home() {
         return;
       }
       setRecipes(data.recipes as Recipe[]);
-      setSearchSeconds(
-        Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
-      );
       setSource(
         data?.source === "local"
           ? "local"
@@ -244,7 +237,6 @@ export default function Home() {
     setRecipes([]);
     setError("");
     setSource(null);
-    setSearchSeconds(null);
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch {
@@ -493,16 +485,13 @@ export default function Home() {
         <section id="print-recipes" className="mt-6">
           {source === "local" ? (
             <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800">
-              ✓ Found 3 saved recipes
-              {searchSeconds !== null ? ` in ${searchSeconds}s` : ""} — AI
-              was busy, so here are saved recipes you can make with what you
-              have. Try again later for fresh AI recipes.
+              ✓ Found 3 saved recipes — AI was busy, so here are saved
+              recipes you can make with what you have. Try again later for
+              fresh AI recipes.
             </p>
           ) : (
             <p className="mb-4 rounded-lg border border-green-200 bg-green-50 px-3 py-2.5 text-sm text-green-800">
-              ✓ Found 3 fresh recipes
-              {searchSeconds !== null ? ` in ${searchSeconds}s` : ""} — made
-              with AI for the ingredients you have.
+              ✓ Found 3 fresh recipes.
             </p>
           )}
           <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
